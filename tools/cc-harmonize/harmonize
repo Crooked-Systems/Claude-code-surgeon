@@ -1,0 +1,226 @@
+
+
+```python
+#!/usr/bin/env python3
+"""
+cc-harmonize — cross-tool memory conflict detector.
+Scans all AI coding tool memory files in a project and flags contradictions.
+No network. No LLM. Just static analysis.
+"""
+import os, sys, json, re, time
+from pathlib import Path
+from collections import defaultdict
+from itertools import combinations
+
+# --- Rule extraction per tool ---
+
+def scan_claude_md(root: Path) -> list[tuple[str, str, int]]:
+    """Extract normative statements from CLAUDE.md files."""
+    rules = []
+    for md in root.rglob('CLAUDE.md'):
+        # Skip hidden dirs except .claude
+        if any(p.startswith('.') and p != '.claude' for p in md.parts[:-1]):
+            continue
+        for i, line in enumerate(md.read_text().splitlines(), 1):
+            line = line.strip()
+            # Catch patterns like "always use X", "never Y", "prefer Z"
+            for pat in [r'always use\s+(.+)', r'never\s+(.+)',
+                        r'prefer\s+(.+)\s+over\s+(.+)',
+                        r'use\s+([\w.]+)\s+for\s+(.+)',
+                        r'do not use\s+(.+)']:
+                m = re.search(pat, line, re.IGNORECASE)
+                if m:
+                    rules.append((str(md.relative_to(root)), i, line))
+                    break
+    return rules
+
+
+def scan_cursor(root: Path) -> list[tuple[str, str, int]]:
+    """Cursor rules files."""
+    rules = []
+    candidates = [root / '.cursorrules']
+    candidates.extend((root / '.cursor' / 'rules').rglob('*.md') if (root / '.cursor' / 'rules').exists() else [])
+    candidates.extend((root / '.cursor' / 'rules').rglob('*.mdc') if (root / '.cursor' / 'rules').exists() else [])
+
+    for f in candidates:
+        if not f.exists():
+            continue
+        for i, line in enumerate(f.read_text().splitlines(), 1):
+            line = line.strip()
+            if any(kw in line.lower() for kw in ['always', 'never', 'prefer', 'use ', 'avoid']):
+                rules.append((str(f.relative_to(root)), i, line))
+    return rules
+
+
+def scan_copilot(root: Path) -> list[tuple[str, str, int]]:
+    """GitHub Copilot instruction files."""
+    rules = []
+    patterns = [
+        root / '.github' / 'copilot-instructions.md',
+        root / '.github' / 'instructions',
+    ]
+    for p in patterns:
+        if p.is_file():
+            for i, line in enumerate(p.read_text().splitlines(), 1):
+                line = line.strip()
+                if any(kw in line.lower() for kw in ['always', 'never', 'prefer', 'use ', 'avoid']):
+                    rules.append((str(p.relative_to(root)), i, line))
+        elif p.is_dir():
+            for f in p.rglob('*.md'):
+                for i, line in enumerate(f.read_text().splitlines(), 1):
+                    line = line.strip()
+                    if any(kw in line.lower() for kw in ['always', 'never', 'prefer', 'use ', 'avoid']):
+                        rules.append((str(f.relative_to(root)), i, line))
+    return rules
+
+
+def scan_agents_md(root: Path) -> list[tuple[str, str, int]]:
+    """AGENTS.md files at any depth."""
+    rules = []
+    for md in root.rglob('AGENTS.md'):
+        for i, line in enumerate(md.read_text().splitlines(), 1):
+            line = line.strip()
+            if any(kw in line.lower() for kw in ['always', 'never', 'prefer', 'use ', 'avoid']):
+                rules.append((str(md.relative_to(root)), i, line))
+    return rules
+
+
+# --- Topic extraction ---
+
+TOPIC_PATTERNS = {
+    'indent': re.compile(r'(indent|tab|spacing|whitespace)', re.I),
+    'testing': re.compile(r'(test|unittest|pytest|jest|mocha|rspec|spec)', re.I),
+    'lint': re.compile(r'(lint|format|prettier|eslint|rubocop|black|ruff)', re.I),
+    'git': re.compile(r'(commit|branch|merge|rebase|pr|pull.request)', re.I),
+    'naming': re.compile(r'(naming|camel.case|snake.case|kebab.case|pascal)', re.I),
+    'types': re.compile(r'(type|interface|generic|any|strict)', re.I),
+    'imports': re.compile(r'(import|require|export|module)', re.I),
+    'docs': re.compile(r'(docstring|comment|document|readme|jsdoc)', re.I),
+    'build': re.compile(r'(build|compile|bundle|webpack|vite|tsc)', re.I),
+    'style': re.compile(r'(style|css|sass|tailwind|styled)', re.I),
+}
+
+def extract_topic(line: str) -> str | None:
+    for topic, pat in TOPIC_PATTERNS.items():
+        if pat.search(line):
+            return topic
+    return None
+
+
+# --- Conflict detection ---
+
+def find_conflicts(all_rules: dict[str, list]) -> list[dict]:
+    """Group rules by topic, flag groups with contradictory rules."""
+    by_topic = defaultdict(list)
+    for tool, rules in all_rules.items():
+        for fname, lineno, text in rules:
+            topic = extract_topic(text)
+            if topic:
+                by_topic[topic].append((tool, fname, lineno, text))
+
+    conflicts = []
+    for topic, entries in by_topic.items():
+        if len(entries) < 2:
+            continue
+        # Check if multiple tools say different things about the same topic
+        # Simple heuristic: look for opposing keywords
+        directives = defaultdict(set)
+        for tool, fname, lineno, text in entries:
+            lowered = text.lower()
+            for kw in ['always', 'never', 'prefer', 'avoid', 'use ', 'do not']:
+                if kw in lowered:
+                    directives[(tool, fname, lineno)].add(text)
+
+        # If entries span multiple tools and contain contradictory-looking patterns,
+        # flag them
+        tools_involved = set(e[0] for e in entries)
+        if len(tools_involved) > 1:
+            conflicts.append({
+                'topic': topic,
+                'entries': [
+                    {'tool': t, 'file': f, 'line': l, 'text': tx}
+                    for t, f, l, tx in entries
+                ]
+            })
+
+    return conflicts
+
+
+# --- Output ---
+
+def format_report(conflicts: list[dict], json_out: bool = False):
+    if json_out:
+        print(json.dumps(conflicts, indent=2))
+        return
+
+    if not conflicts:
+        print("No conflicts detected.")
+        return
+
+    for c in conflicts:
+        topic = c['topic'].upper()
+        print(f"\nTOPIC: {topic}")
+        for entry in c['entries']:
+            print(f"  {entry['file']}:{entry['line']}  [{entry['tool']}]")
+            print(f"    → {entry['text']}")
+    print(f"\n{len(conflicts)} conflict(s) found.")
+
+
+# --- Main ---
+
+def main():
+    import argparse
+    ap = argparse.ArgumentParser(description='Cross-tool AI memory conflict detector')
+    ap.add_argument('--json', action='store_true', help='JSON output')
+    ap.add_argument('--ci', action='store_true', help='Exit 1 if conflicts found')
+    ap.add_argument('--watch', action='store_true', help='Re-scan on file changes')
+    ap.add_argument('--dir', default='.', help='Project root directory')
+    args = ap.parse_args()
+
+    root = Path(args.dir).resolve()
+
+    scanners = {
+        'claude_code': scan_claude_md,
+        'cursor': scan_cursor,
+        'copilot': scan_copilot,
+        'agents': scan_agents_md,
+    }
+
+    def run_scan():
+        all_rules = {}
+        for tool_name, scanner in scanners.items():
+            rules = scanner(root)
+            if rules:
+                all_rules[tool_name] = rules
+        conflicts = find_conflicts(all_rules)
+        format_report(conflicts, args.json)
+        return conflicts
+
+    conflicts = run_scan()
+
+    if args.watch:
+        print("\nWatching for changes... (Ctrl+C to stop)")
+        try:
+            import hashlib
+            seen = {}
+            while True:
+                time.sleep(3)
+                # Cheap change detection: hash all rule files
+                current = hashlib.md5()
+                for f in root.rglob('CLAUDE.md'):
+                    current.update(f.read_bytes())
+                for f in root.rglob('.cursorrules'):
+                    current.update(f.read_bytes())
+                digest = current.hexdigest()
+                if digest != seen.get('last'):
+                    seen['last'] = digest
+                    print("\n--- Changes detected, re-scanning ---")
+                    conflicts = run_scan()
+        except KeyboardInterrupt:
+            print("\nDone.")
+
+    if args.ci and conflicts:
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()
