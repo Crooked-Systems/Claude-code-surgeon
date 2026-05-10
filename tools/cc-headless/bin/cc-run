@@ -1,0 +1,124 @@
+
+
+```bash
+#!/usr/bin/env bash
+# cc-run — reliable headless Claude Code execution with retries.
+#
+# Usage: cc-run [options] "<prompt>"
+# Options:
+#   --timeout N    Max seconds per attempt (default: 600)
+#   --retries N    Max attempts (default: 3)
+#   --model NAME   Model to use (default: sonnet)
+#   --ci           Strict mode: non-zero exit on any failure
+#   --stdin        Read prompt from stdin
+#   --json         Output raw JSON stream
+#   --output FILE  Write output to file
+
+set -euo pipefail
+
+TIMEOUT=600
+RETRIES=3
+MODEL="sonnet"
+CI_MODE=false
+STDIN_MODE=false
+JSON_OUT=false
+OUTPUT_FILE=""
+PROMPT=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --timeout) TIMEOUT="$2"; shift 2 ;;
+        --retries) RETRIES="$2"; shift 2 ;;
+        --model)   MODEL="$2"; shift 2 ;;
+        --ci)      CI_MODE=true; shift ;;
+        --stdin)   STDIN_MODE=true; shift ;;
+        --json)    JSON_OUT=true; shift ;;
+        --output)  OUTPUT_FILE="$2"; shift 2 ;;
+        --*)       echo "Unknown flag: $1" >&2; exit 2 ;;
+        *)         PROMPT="$1"; shift ;;
+    esac
+done
+
+if $STDIN_MODE; then
+    PROMPT="${PROMPT:-$(cat)}"
+fi
+
+[[ -n "$PROMPT" ]] || { echo "No prompt provided." >&2; exit 2; }
+
+# Rate-limit backoff helper
+backoff() {
+    local attempt="$1"
+    local delay=$((2 ** attempt))
+    [[ $delay -gt 120 ]] && delay=120
+    echo "  Rate limited. Waiting ${delay}s..." >&2
+    sleep "$delay"
+}
+
+# Run a single attempt
+try_run() {
+    local outfile
+    outfile=$(mktemp /tmp/cc-run.XXXXXX)
+
+    set +e
+    if $JSON_OUT; then
+        timeout "$TIMEOUT" claude -p "$PROMPT" \
+            --model "$MODEL" \
+            --output-format stream-json \
+            --permission-mode accept-edits \
+            > "$outfile" 2>/tmp/cc-run.stderr
+    else
+        timeout "$TIMEOUT" claude -p "$PROMPT" \
+            --model "$MODEL" \
+            --permission-mode accept-edits \
+            > "$outfile" 2>/tmp/cc-run.stderr
+    fi
+    local rc=$?
+    set -e
+
+    # Check for rate limiting in stderr
+    if grep -qi 'rate limit\|usage_limit\|too many requests' /tmp/cc-run.stderr 2>/dev/null; then
+        rm -f "$outfile"
+        return 2  # Special code: rate limited
+    fi
+
+    if [[ $rc -eq 0 ]]; then
+        if [[ -n "$OUTPUT_FILE" ]]; then
+            mv "$outfile" "$OUTPUT_FILE"
+        else
+            cat "$outfile"
+        fi
+        rm -f "$outfile" /tmp/cc-run.stderr
+        return 0
+    fi
+
+    rm -f "$outfile"
+    return 1
+}
+
+# Main retry loop
+for ((attempt=1; attempt<=RETRIES; attempt++)); do
+    if [[ $attempt -gt 1 ]]; then
+        echo "cc-run: attempt ${attempt}/${RETRIES}..." >&2
+    fi
+
+    try_run && exit 0
+    rc=$?
+
+    if [[ $rc -eq 2 ]]; then
+        backoff "$attempt"
+        continue
+    fi
+
+    if [[ $attempt -lt $RETRIES ]]; then
+        wait_time=$((5 * attempt))
+        echo "  Failed. Retrying in ${wait_time}s..." >&2
+        sleep "$wait_time"
+    fi
+done
+
+# All retries exhausted
+echo "cc-run: all ${RETRIES} attempts failed." >&2
+if $CI_MODE; then
+    exit 1
+fi
+exit 0
