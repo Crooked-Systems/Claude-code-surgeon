@@ -22,7 +22,7 @@ Each tool solves one problem. No frameworks. No dependencies beyond `bash`, `jq`
 ## Quick Install
 
 ```bash
-git clone https://github.com/your-org/claude-code-surgeon.git
+git clone https://github.com/Crooked-Systems/claude-code-surgeon.git
 cd claude-code-surgeon
 
 # Install everything
