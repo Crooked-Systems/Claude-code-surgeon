@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Post-compaction prompt injector.
+# After any compaction has occurred, injects a pointer to the anchor file.
+
+set -euo pipefail
+INPUT=$(cat)
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id')
+PROJECT=$(echo "$INPUT" | jq -r '.cwd')
+ANCHOR_FILE="$PROJECT/.claude/anchor/$SESSION_ID.md"
+
+if [[ -f "$ANCHOR_FILE" ]]; then
+    ANCHOR_AGE=$(($(date +%s) - $(stat -c %Y "$ANCHOR_FILE" 2>/dev/null || stat -f %m "$ANCHOR_FILE" 2>/dev/null)))
+    # Only inject if anchor was created recently (compaction happened this session)
+    if [[ $ANCHOR_AGE -lt 3600 ]]; then
+        # Output goes to stdout, which Claude Code reads as additional context
+        # for UserPromptSubmit hooks
+        echo "--- context-anchor ---"
+        echo "Pre-compaction context was saved to: $ANCHOR_FILE"
+        echo "If you need details from before the last compaction, read that file."
+        echo "--- end context-anchor ---"
+    fi
+fi
+
+exit 0
