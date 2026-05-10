@@ -1,0 +1,8 @@
+
+That's it. Comments start with `#`. Empty lines ignored. The `block <pattern>` syntax uses the same permission rule format Claude Code uses internally.
+
+You can also use `warn` instead of `block` — those show as stderr but allow the operation.
+
+## Why .d directory?
+
+So teams can split rules by concern. `security.rule`, `testing.rule`, `deployment.rule`. Each one small enough to review in a PR.
