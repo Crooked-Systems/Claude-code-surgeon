@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Forces tool list refresh for MCP servers on session resume.
+# Writes discovered tools to .claude/mcp-tools/<server>.json
+
+set -euo pipefail
+INPUT=$(cat)
+CWD=$(echo "$INPUT" | jq -r '.cwd')
+MCP_DIR="$CWD/.claude/mcp-tools"
+mkdir -p "$MCP_DIR"
+
+# Find MCP server configs
+MCP_CONFIG="$CWD/.mcp.json"
+[[ -f "$MCP_CONFIG" ]] || exit 0
+
+# For each configured server, try to query tools/list
+# (this is best-effort; if server isn't running, we skip silently)
+while IFS= read -r server_name; do
+    OUTFILE="$MCP_DIR/${server_name}.json"
+
+    # Attempt tools/list via the server's transport
+    # We try the streamable HTTP transport path first
+    URL=$(jq -r ".mcpServers[\"$server_name\"].url // empty" "$MCP_CONFIG" 2>/dev/null)
+    if [[ -n "$URL" ]]; then
+        RESP=$(curl -s -X POST "${URL}/tools/list" \
+            -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+            --connect-timeout 3 2>/dev/null || true)
+        if echo "$RESP" | jq -e '.result.tools' >/dev/null 2>&1; then
+            echo "$RESP" | jq '.result.tools' > "$OUTFILE"
+        fi
+    fi
+done < <(jq -r '.mcpServers // {} | keys[]' "$MCP_CONFIG" 2>/dev/null)
+
+exit 0
