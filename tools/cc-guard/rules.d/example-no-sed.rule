@@ -1,0 +1,5 @@
+# Block sed usage — CLAUDE.md says never use sed, this enforces it
+block Bash(sed *)
+block Bash(sed)
+block Bash(* | sed)
+block Bash(* | sed *)
