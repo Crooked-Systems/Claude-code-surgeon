@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# PreToolUse hook — checks tool call against rules.d before execution.
+
+set -euo pipefail
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$HOOK_DIR/lib/matcher.sh"
+
+INPUT=$(cat)
+TOOL=$(echo "$INPUT" | jq -r '.tool_name')
+TOOL_INPUT=$(echo "$INPUT" | jq -r '.tool_input // {}')
+CWD=$(echo "$INPUT" | jq -r '.cwd')
+RULES_DIR="$CWD/.claude/rules.d"
+
+# No rules dir? Allow everything.
+[[ -d "$RULES_DIR" ]] || exit 0
+
+# Build the full tool call string for matching
+case "$TOOL" in
+    Bash)
+        CMD=$(echo "$TOOL_INPUT" | jq -r '.command // ""')
+        CALL="${TOOL}(${CMD})"
+        ;;
+    Write|Edit)
+        FPATH=$(echo "$TOOL_INPUT" | jq -r '.file_path // ""')
+        CALL="${TOOL}(${FPATH})"
+        ;;
+    *) CALL="$TOOL" ;;
+esac
+
+# Walk all rule files
+while IFS= read -r -d '' rulefile; do
+    while IFS= read -r line; do
+        # Skip comments and blanks
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line// }" ]] && continue
+
+        if [[ "$line" =~ ^block[[:space:]]+(.*) ]]; then
+            pattern="${BASH_REMATCH[1]}"
+            if match_permission_rule "$CALL" "$pattern"; then
+                echo "BLOCKED by rule: $pattern (in $(basename "$rulefile"))" >&2
+                exit 2
+            fi
+        elif [[ "$line" =~ ^warn[[:space:]]+(.*) ]]; then
+            pattern="${BASH_REMATCH[1]}"
+            if match_permission_rule "$CALL" "$pattern"; then
+                echo "WARNING: matched rule: $pattern (in $(basename "$rulefile"))" >&2
+            fi
+        fi
+    done < "$rulefile"
+done < <(find "$RULES_DIR" -name '*.rule' -type f -print0)
+
+exit 0
