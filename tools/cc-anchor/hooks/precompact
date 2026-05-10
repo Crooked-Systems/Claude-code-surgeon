@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# PreCompact hook — runs before context compaction.
+# Reads the session transcript, finds the last user message + @anchor mentions,
+# writes a compact memory file.
+
+set -euo pipefail
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$HOOK_DIR/lib/anchor.sh"
+
+INPUT=$(cat)
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id')
+TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path')
+PROJECT=$(echo "$INPUT" | jq -r '.cwd')
+
+ANCHOR_DIR="$PROJECT/.claude/anchor"
+mkdir -p "$ANCHOR_DIR"
+OUTFILE="$ANCHOR_DIR/$SESSION_ID.md"
+
+{
+    echo "# anchor snapshot"
+    echo "session: $SESSION_ID"
+    echo "time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo ""
+
+    # Walk transcript backward to find last user message
+    if [[ -f "$TRANSCRIPT" ]]; then
+        last_user_msg=$(walk_back_find_user "$TRANSCRIPT")
+        if [[ -n "$last_user_msg" ]]; then
+            echo "## last user intent"
+            echo "$last_user_msg"
+            echo ""
+        fi
+    fi
+
+    # Check for @anchor mentions in recent messages
+    if [[ -f "$TRANSCRIPT" ]]; then
+        anchors=$(grep -oP '@anchor\s*\K.*' "$TRANSCRIPT" 2>/dev/null | tail -5 || true)
+        if [[ -n "$anchors" ]]; then
+            echo "## anchored items"
+            echo "$anchors" | while read -r line; do
+                echo "- $line"
+            done
+            echo ""
+        fi
+    fi
+
+    # Include global anchors if present
+    if [[ -f "$ANCHOR_DIR/global.md" ]]; then
+        echo "## global anchors"
+        cat "$ANCHOR_DIR/global.md"
+        echo ""
+    fi
+
+    echo "---"
+    echo "Read this file if you need to recover context after compaction."
+} > "$OUTFILE"
+
+echo '{"decision":"allow"}' 
+exit 0
