@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# SessionStart hook — injects global skills into new sessions.
+# Claude Code only sees project-local skills by default.
+# This makes ~/.claude/skills/ discoverable.
+
+set -euo pipefail
+
+GLOBAL_SKILLS="$HOME/.claude/skills"
+[[ -d "$GLOBAL_SKILLS" ]] || exit 0
+
+# Count skills found
+SKILL_COUNT=$(find "$GLOBAL_SKILLS" -maxdepth 2 -name 'SKILL.md' -type f 2>/dev/null | wc -l | tr -d ' ')
+[[ "$SKILL_COUNT" -gt 0 ]] || exit 0
+
+# Build a compact skill manifest
+# stdout from SessionStart hooks is injected as context that Claude can see
+echo "--- global-skills ---"
+echo "The following global skills are available (read ~/.claude/skills/<name>/SKILL.md for details):"
+echo ""
+
+find "$GLOBAL_SKILLS" -maxdepth 2 -name 'SKILL.md' -type f 2>/dev/null | sort | while IFS= read -r skillfile; do
+    skill_dir=$(dirname "$skillfile")
+    skill_name=$(basename "$skill_dir")
+
+    # Extract first heading as description
+    desc=$(head -20 "$skillfile" | grep -m1 '^# ' | sed 's/^# //' || echo "$skill_name")
+    echo "- **${skill_name}**: ${desc}"
+done
+
+echo ""
+echo "To use a skill, mention it by name or read its SKILL.md."
+echo "--- end global-skills ---"
+
+exit 0
