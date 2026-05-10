@@ -1,0 +1,8 @@
+CONFLICT: indent_style
+  CLAUDE.md:12      → "use tabs"
+  .cursorrules:5    → "use 2 spaces"
+  .github/copilot-instructions.md:8 → "use spaces"
+
+CONFLICT: test_framework
+  CLAUDE.md:45      → "use pytest"
+  AGENTS.md:23      → "use unittest"
